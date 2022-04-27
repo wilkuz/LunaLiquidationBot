@@ -12,6 +12,7 @@ import sys
 import requests
 import json
 import base64
+import os
 
 
 network = 'columbus-5'
