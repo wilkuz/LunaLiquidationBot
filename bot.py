@@ -7,6 +7,7 @@ from terra_sdk.core.market import MsgSwap
 from terra_sdk.core.coins import Coins
 from terra_sdk.core.coins import Coin
 from datetime import datetime
+from dot_env import load_dotenv
 import sys
 import requests
 import json
