@@ -19,6 +19,12 @@ network = 'columbus-5'
 networkRPC = "https://lcd.terra.dev"
 
 terra = LCDClient(networkRPC, network)
+
+connection = terra.tendermint.node_info()
+if not connection["default_node_info"]["network"] == network:
+    print(connection)
+    sys.exit("No connection could be made to network")
+
 load_dotenv()
 mn = os.environ.get("Mnemonic")
 mk = MnemonicKey(mnemonic=mn)
@@ -39,18 +45,19 @@ print(ACTIVE_WALLET_ADRESS)
 def placeBid(symbolAdress, premium):
     currentBalance = terra.bank.balance(ACTIVE_WALLET_ADRESS)
     currentUSTBalance = int(round(currentBalance[0]["uusd"].amount))
-    
-    executeMsg = {"submit_bid": {
-        "collateral_token": symbolAdress,
-        "premium_slot": premium
-    }}
-    msg = MsgExecuteContract(ACTIVE_WALLET_ADRESS, ANC_LIQ_QUE_CONTRACT, execute_msg=executeMsg, coins={"uusd": int(currentUSTBalance-10000000)})
-    print(f"attempting to submit bid of {(currentUSTBalance-10000000) / 1000000} UST")
-    executeTx = WALLET.create_and_sign_tx(CreateTxOptions(msgs=[msg], memo="place bid"))
-    executeTxResult = terra.tx.broadcast(executeTx)
-    print("submitBidHash:")
-    print(executeTxResult.txhash)
-    return executeTxResult.txhash
+
+    if currentUSTBalance > 10000000:
+      executeMsg = {"submit_bid": {
+          "collateral_token": symbolAdress,
+          "premium_slot": premium
+      }}
+      print(f"attempting to submit bid of {(currentUSTBalance-10000000) / 1000000} UST")
+      msg = MsgExecuteContract(ACTIVE_WALLET_ADRESS, ANC_LIQ_QUE_CONTRACT, execute_msg=executeMsg, coins={"uusd": int(currentUSTBalance-10000000)})
+      executeTx = WALLET.create_and_sign_tx(CreateTxOptions(msgs=[msg], memo="place bid"))
+      executeTxResult = terra.tx.broadcast(executeTx)
+      print("submitBidHash:")
+      print(executeTxResult.txhash)
+      return executeTxResult.txhash
 
 # gets the Anc liq que bid idx from a txhash
 def getTxID(hash):
@@ -62,6 +69,7 @@ def getTxID(hash):
 
 # gets info about a bid idx
 def getBidInfo(ID):
+    ID = str(ID)
     bidInfo = terra.wasm.contract_query(ANC_LIQ_QUE_CONTRACT, {"bid": {"bid_idx": ID}})
     return bidInfo
 
@@ -112,108 +120,106 @@ def claimLiq(ID, symbolAdress):
     executeTxResult = terra.tx.broadcast(executeTx)
     print(f"withdrawal tx hash: {executeTxResult.txhash}")
 
-if __name__ == "__main__":
+def astroSwap_bLuna_UST():
+  WALLET = terra.wallet(mk)
+  BLunaBalance = terra.wasm.contract_query(BLUNA_CONTRACT, {"balance": {"address": ACTIVE_WALLET_ADRESS}})
+  swapAmount = BLunaBalance["balance"]
+  minReceive = round(int(swapAmount) * 0.95)
+  if int(swapAmount) > 0:
+      astroMsg = {
+      "execute_swap_operations":
+      {
+          "offer_amount":swapAmount,
+          "operations":[{
+          "astro_swap":{
+              "offer_asset_info":{
+              "token":{
+                  "contract_addr":BLUNA_CONTRACT
+                  }
+              },
+              "ask_asset_info":{
+                  "native_token":{
+                  "denom":"uluna"
+                  }
+              }
+              }
+          },
+          {
+          "astro_swap":{
+                  "offer_asset_info":{
+                  "native_token":{
+                      "denom":"uluna"
+                      }
+                  },
+                  "ask_asset_info":{
+                      "native_token":{
+                      "denom":"uusd"
+                      }
+                      }
+                  }
+                  }],
+                  "minimum_receive":str(minReceive),"max_spread":"0.05"
+                  }
+              }
+      # encode to base64 for Astro router
+      message_bytes = json.dumps(astroMsg).replace(" ", "").encode('utf-8')
+      base64_bytes = base64.b64encode(message_bytes)
+      base64_message = base64_bytes.decode('utf-8')
+      sendMsg = {
+          "send": {
+              "amount": swapAmount,
+              "contract": ASTROPORT_ROUTER,
+              "msg": base64_message
+          }
+      }
+      print(f"swapping {int(swapAmount) / 1000000} bLuna to UST on Astroport")
+      swapToUST = MsgExecuteContract(ACTIVE_WALLET_ADRESS, BLUNA_CONTRACT, execute_msg=sendMsg)
+      executeSwap = WALLET.create_and_sign_tx(CreateTxOptions(msgs=[swapToUST]))
+      result = terra.tx.broadcast(executeSwap)
+      print(result.txhash)
+  else:
+      print("no bLuna to swap")
+
+__name__ == "__main__":
     while True:
-        connection = terra.tendermint.node_info()
-        if not connection["default_node_info"]["network"] == network:
-            print(connection)
-            sys.exit("No connection could be made to network")
+      WALLET = terra.wallet(mk)
+      premium = 2
+      swapNeeded = False
+      #if wallet balance is above 50USD, place bid
+      USTBalance = terra.bank.balance(ACTIVE_WALLET_ADRESS)[0]["uusd"].amount
+      if USTBalance > 500000000:
+          placeBid(BLUNA_CONTRACT, premium)
+      #get current bids IDs
+      currentBids = getBidsByUser(ACTIVE_WALLET_ADRESS)
+      #if there are no current bids, place one
+      if not currentBids:
+        placeBid(BLUNA_CONTRACT, premium)
+        currentBids = getBidsByUser(ACTIVE_WALLET_ADRESS)
+      for bid in currentBids:
+        #query the contract with given bid ID
+        currentBidInfo = getBidInfo(bid)
+        currentBidToken, currentBidTokenAdress = getTokenInfo(currentBidInfo)
+
+        #check if current bid is active
+        if currentBidInfo["wait_end"] == None:
+            print(f"bid {bid} is active")
+            # if there is collateral to be withdrawn
+            if int(currentBidInfo["pending_liquidated_collateral"]) > 5000:
+                print(f"withdrawal of {float(currentBidInfo['pending_liquidated_collateral']) / 1000000} {currentBidToken} pending")
+                #withdraw tokens from contract
+                claimLiq(bid, currentBidTokenAdress)
+
+                print("swap needed")
+                swapNeeded = True
+            else:
+                print(f"waiting to be filled {str(round(int(currentBidInfo['amount']) / 1000000, 2))} USD remaining in the {currentBidInfo['premium_slot']} % pool")
+        elif datetime.utcfromtimestamp(currentBidInfo["wait_end"] + 30) < datetime.utcnow():
+            print("ready to activate")
+            activateBid(bid, currentBidTokenAdress)
         else:
-            premium = 1
+            print(f"not ready, wait_end: {datetime.utcfromtimestamp(currentBidInfo['wait_end'])} UTC, current time {datetime.utcnow()}")
 
-            #if wallet balance is above 50USD, place bid
-            USTBalance = terra.bank.balance(ACTIVE_WALLET_ADRESS)[0]["uusd"].amount
-            if USTBalance > 50000000:
-                placeBid(BLUNA_CONTRACT, premium)
-
-            #get current bids IDs
-            currentBids = getBidsByUser(ACTIVE_WALLET_ADRESS)
-            if currentBids == []:
-                placeBid(BLUNA_CONTRACT, premium)
-                currentBids = getBidsByUser(ACTIVE_WALLET_ADRESS)
-            for bid in currentBids:
-                #query the contract with given bid ID
-                currentBidInfo = getBidInfo(bid)
-                currentBidToken, currentBidTokenAdress = getTokenInfo(currentBidInfo)
-
-                #check if current bid is active
-                if currentBidInfo["wait_end"] == None:
-                    print(f"bid {bid} is active")
-                    # if there is collateral to be withdrawn
-                    if float(currentBidInfo["pending_liquidated_collateral"]) > 0:
-                        print(f"withdrawal of {float(currentBidInfo['pending_liquidated_collateral']) / 1000} {currentBidToken} pending")
-                        #withdraw tokens from contract
-                        claimLiq(bid, currentBidTokenAdress)
-
-                        ## swap bLuna to Luna on Astroport ##
-
-                        BLunaBalance = terra.wasm.contract_query(BLUNA_CONTRACT, {"balance": {"address": ACTIVE_WALLET_ADRESS}})
-                        swapAmount = BLunaBalance["balance"]
-                        minReceive = round(int(swapAmount) * 0.95)
-                        astroMsg = {
-                        "execute_swap_operations":
-                        {
-                            "offer_amount":swapAmount,
-                            "operations":[{
-                            "astro_swap":{
-                                "offer_asset_info":{
-                                "token":{
-                                    "contract_addr":BLUNA_CONTRACT
-                                    }
-                                },
-                                "ask_asset_info":{
-                                    "native_token":{
-                                    "denom":"uluna"
-                                    }
-                                }
-                                }
-                            },
-                            {
-                            "astro_swap":{
-                                    "offer_asset_info":{
-                                    "native_token":{
-                                        "denom":"uluna"
-                                        }
-                                    },
-                                    "ask_asset_info":{
-                                        "native_token":{
-                                        "denom":"uusd"
-                                        }
-                                        }
-                                    }
-                                    }],
-                                    "minimum_receive":str(minReceive),"max_spread":"0.15"
-                                    }
-                                }
-                        # encode to base64 for Astro router
-                        message_bytes = json.dumps(astroMsg).replace(" ", "").encode('utf-8')
-                        base64_bytes = base64.b64encode(message_bytes)
-                        base64_message = base64_bytes.decode('utf-8')
-                        sendMsg = {
-                            "send": {
-                                "amount": swapAmount,
-                                "contract": ASTROPORT_ROUTER,
-                                "msg": base64_message
-                            }
-                        }
-                        print("swapping bLuna to UST on Astroport")
-                        swapToUST = MsgExecuteContract(ACTIVE_WALLET_ADRESS, BLUNA_CONTRACT, execute_msg=sendMsg)
-                        executeSwap = WALLET.create_and_sign_tx(CreateTxOptions(msgs=[swapToUST]))
-                        result = terra.tx.broadcast(executeSwap)
-                        print(result.txhash)
-
-                        #place new bid with UST
-                        placeBid(BLUNA_CONTRACT, premium)
-
-                    else:
-                        print(f"waiting to be filled {str(round(int(currentBidInfo['amount']) / 1000000, 2))} USD remaining in the {premium}% pool")
-                elif datetime.utcfromtimestamp(currentBidInfo["wait_end"]) < datetime.utcnow():
-                    print("ready to activate")
-                    activateBid(bid, currentBidTokenAdress)
-                else:
-                    print(f"not ready, wait_end: {datetime.utcfromtimestamp(currentBidInfo['wait_end'])} UTC")
-                    print()
-                #query recent liquidation bid until it is filled
-                #handle the response - if filled, withdraw and sell the bought amount, place another bid
-                #save the bid id and use it for the next querys
-                sleep(1)
+          # if bids have been filled in current iteration, swap to UST and place new bid
+      if swapNeeded == True:
+          astroSwap_bLuna_UST()
+      sleep(1)
