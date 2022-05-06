@@ -117,8 +117,13 @@ def claimLiq(symbolAdress):
   }}
   print(f"attempting to claim/withdraw bids")
   msg = MsgExecuteContract(ACTIVE_WALLET_ADRESS, ANC_LIQ_QUE_CONTRACT, execute_msg=executeMsg)
-  executeTx = WALLET.create_and_sign_tx(CreateTxOptions(msgs=[msg]))
-  executeTxResult = terra.tx.broadcast(executeTx)
+  try:
+    executeTx = WALLET.create_and_sign_tx(CreateTxOptions(msgs=[msg]))
+    executeTxResult = terra.tx.broadcast(executeTx)
+  except:
+    print("error occured during withdrawal, trying again...")
+    sleep(1)
+    claimLiq(BLUNA_CONTRACT)
   print(f"withdrawal tx hash: {executeTxResult.txhash}")
 
 def astroSwap_bLuna_UST(swapAmount):
@@ -181,49 +186,50 @@ def astroSwap_bLuna_UST(swapAmount):
     print("no bLuna to swap")
     return
 
-if __name__ == "__main__":
-    while True:
-      WALLET = terra.wallet(mk)
-      premium = 2
 
-      #if wallet has bLuna balance, swap it to UST
-      BLunaBalance = terra.wasm.contract_query(BLUNA_CONTRACT, {"balance": {"address": ACTIVE_WALLET_ADRESS}})
-      swapAmount = BLunaBalance["balance"]
-      if int(swapAmount) > 0:
-        astroSwap_bLuna_UST(swapAmount)
+while True:
+  WALLET = terra.wallet(mk)
+  premium = 1
 
-      #if wallet balance is above 50USD, place bid
-      USTBalance = terra.bank.balance(ACTIVE_WALLET_ADRESS)[0]["uusd"].amount
-      if USTBalance > 50000000:
-          placeBid(BLUNA_CONTRACT, premium)
+  #if wallet has bLuna balance, swap it to UST
+  BLunaBalance = terra.wasm.contract_query(BLUNA_CONTRACT, {"balance": {"address": ACTIVE_WALLET_ADRESS}})
+  swapAmount = BLunaBalance["balance"]
+  if int(swapAmount) > 0:
+    astroSwap_bLuna_UST(swapAmount)
+  
+  #if wallet balance is above 50USD, place bid
+  USTBalance = terra.bank.balance(ACTIVE_WALLET_ADRESS)[0]["uusd"].amount
+  if USTBalance > 50000000:
+    placeBid(BLUNA_CONTRACT, premium)
+    sleep(0.5)
 
-      #get current bids IDs
-      currentBids = getBidsByUser(ACTIVE_WALLET_ADRESS)
+  #get current bids IDs
+  currentBids = getBidsByUser(ACTIVE_WALLET_ADRESS)
+  
+  #if there are no current bids, place one
+  if not currentBids:
+    placeBid(BLUNA_CONTRACT, premium)
+    sleep(0.5)
+    currentBids = getBidsByUser(ACTIVE_WALLET_ADRESS)
 
-      #if there are no current bids, place one
-      if not currentBids:
-        placeBid(BLUNA_CONTRACT, premium)
-        currentBids = getBidsByUser(ACTIVE_WALLET_ADRESS)
+  for bid in currentBids:
+    #query the contract with given bid ID
+    currentBidInfo = getBidInfo(bid)
 
-      for bid in currentBids:
-        #query the contract with given bid ID
-        currentBidInfo = getBidInfo(bid)
-        currentBidToken, currentBidTokenAdress = getTokenInfo(currentBidInfo)
-
-        #check if current bid is active
-        if currentBidInfo["wait_end"] == None:
-            print(f"bid {bid} is active")
-            # if there is collateral to be withdrawn
-            if int(currentBidInfo["pending_liquidated_collateral"]) > 10000:
-                print(f"withdrawal of {float(currentBidInfo['pending_liquidated_collateral']) / 1000000} {currentBidToken} pending")
-                #withdraw tokens from contract
-                claimLiq(currentBidTokenAdress)
-            else:
-                print(f"waiting to be filled {str(round(int(currentBidInfo['amount']) / 1000000, 2))} USD remaining in the {currentBidInfo['premium_slot']} % pool")
-        elif datetime.utcfromtimestamp(currentBidInfo["wait_end"] + 30) < datetime.utcnow():
-            print("ready to activate")
-            activateBid(bid, currentBidTokenAdress)
+    #check if current bid is active
+    if currentBidInfo["wait_end"] == None:
+        print(f"bid {bid} is active")
+        # if there is collateral to be withdrawn
+        if int(currentBidInfo["pending_liquidated_collateral"]) > 10000:
+            print(f"withdrawal of {float(currentBidInfo['pending_liquidated_collateral']) / 1000000} bLuna pending")
+            #withdraw tokens from contract
+            claimLiq(BLUNA_CONTRACT)
         else:
-            print(f"not ready, wait_end: {datetime.utcfromtimestamp(currentBidInfo['wait_end'])} UTC, current time {datetime.utcnow()}")
-
-      sleep(1)
+            print(f"waiting to be filled {str(round(int(currentBidInfo['amount']) / 1000000, 2))} USD remaining in the {currentBidInfo['premium_slot']} % pool")
+    elif datetime.utcfromtimestamp(currentBidInfo["wait_end"] + 30) < datetime.utcnow():
+        print("ready to activate")
+        activateBid(bid, BLUNA_CONTRACT)
+    else:
+        print(f"not ready, wait_end: {datetime.utcfromtimestamp(currentBidInfo['wait_end'])} UTC, current time {datetime.utcnow()}")
+  
+  sleep(1)
